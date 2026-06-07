@@ -1,4 +1,5 @@
 import torch
+from torch import Tensor
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
@@ -6,7 +7,7 @@ import graph_lib
 from model import utils as mutils
 
 
-def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False):
+def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False, loss_type: str="pretrain") -> function:
 
     def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None):
         """
@@ -31,8 +32,42 @@ def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False):
         loss = (dsigma[:, None] * loss).sum(dim=-1)
 
         return loss
+    
+    #-------------------------- new --------------------------
+    def loss_fn_sft(model, batch, response_mask, cond=None, t=None, perturbed_batch=None) -> Tensor:
+            """
+            Batch shape: [B, L] int. D given from graph
+            """
+    
+            if t is None:
+                if lv:
+                    raise NotImplementedError("Yeah I gotta do this later")
+                else:
+                    t = (1 - sampling_eps) * torch.rand(batch.shape[0], device=batch.device) + sampling_eps
+                
+            sigma, dsigma = noise(t)
+            
+            if perturbed_batch is None:
+                perturbed_batch = graph.sample_transition(batch, sigma[:, None])
+                # 只对 response 位置加噪，prompt 位置保持原始 token
+                if response_mask is not None:
+                    perturbed_batch = torch.where(response_mask.bool(), perturbed_batch, batch)
 
-    return loss_fn
+            log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
+            log_score = log_score_fn(perturbed_batch, sigma)
+            loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+            if response_mask is not None:
+                loss = loss * response_mask  # mask prompt 位置的 loss
+    
+            loss = (dsigma[:, None] * loss).sum(dim=-1)
+    
+            return loss
+    #-------------------------- new --------------------------
+
+    if loss_type=="pretrain":
+        return loss_fn
+    elif loss_type=="sft":
+        return loss_fn_sft
 
 
 def get_optimizer(config, params):
@@ -74,13 +109,13 @@ def optimization_manager(config):
     return optimize_fn
 
 
-def get_step_fn(noise, graph, train, optimize_fn, accum):
-    loss_fn = get_loss_fn(noise, graph, train)
+def get_step_fn(noise, graph, train, optimize_fn, accum, loss_type: str) -> function:
+    loss_fn = get_loss_fn(noise, graph, train, loss_type)
 
     accum_iter = 0
     total_loss = 0
 
-    def step_fn(state, batch, cond=None):
+    def step_fn(state, batch, response_mask, cond=None) ->Tensor:
         nonlocal accum_iter 
         nonlocal total_loss
 
@@ -89,7 +124,10 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
         if train:
             optimizer = state['optimizer']
             scaler = state['scaler']
-            loss = loss_fn(model, batch, cond=cond).mean() / accum
+            if loss_type == "pretrain":
+                loss = loss_fn(model, batch, cond=cond).mean() / accum
+            elif loss_type == "sft":
+                loss = loss_fn(model, batch, response_mask, cond=cond).mean() / accum
             
             scaler.scale(loss).backward()
 
@@ -110,7 +148,10 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
                 ema = state['ema']
                 ema.store(model.parameters())
                 ema.copy_to(model.parameters())
-                loss = loss_fn(model, batch, cond=cond).mean()
+                if loss_type == "pretrain":
+                    loss = loss_fn(model, batch, cond=cond).mean() / accum
+                elif loss_type == "sft":
+                    loss = loss_fn(model, batch, response_mask, cond=cond).mean() / accum
                 ema.restore(model.parameters())
 
         return loss
