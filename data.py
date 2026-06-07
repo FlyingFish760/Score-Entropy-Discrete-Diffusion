@@ -1,4 +1,5 @@
 import re
+from torch import Tensor
 from transformers import GPT2TokenizerFast
 from datasets import load_dataset
 from itertools import chain
@@ -198,7 +199,91 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
 
     return chunked_dataset
 
+#-------------------------- new --------------------------
+def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer):
+    """
+    Tokenize the prompt and output strings, and construct a mask that is 1 for the response tokens
+    and 0 for other tokens (prompt or padding).
 
+    Args:
+        prompt_strs (list[str]): List of prompt strings.
+        output_strs (list[str]): List of output strings.
+        tokenizer (PreTrainedTokenizer): Tokenizer to use for tokenization.
+
+    Returns:
+        dict[str, torch.Tensor]: Let prompt_and_output_lens be a list containing the lengths of
+        the tokenized prompt and output strings. The returned dictionary has:
+            - token_ids (torch.Tensor of shape (batch_size, max(prompt_and_output_lens)):
+              the tokenized prompt+output strings.
+            - response_mask (torch.Tensor of shape (batch_size, max(prompt_and_output_lens)):
+              a mask on the response tokens in the labels.
+    """
+    # Tokenize prompts and outputs, and construct reponse_mask
+    tokenized_ids = []
+    response_mask = []
+    max_prompt_output_len = 0
+    for prompt, output in zip(prompt_strs, output_strs):
+        prompt_id = tokenizer.encode(prompt, add_special_tokens=False)
+        output_id = tokenizer.encode(output, add_special_tokens=False)
+        tokenized_id = prompt_id + output_id
+        tokenized_ids.append(tokenized_id)
+
+        prompt_output_len = len(tokenized_id)
+        if prompt_output_len > max_prompt_output_len:
+            max_prompt_output_len = prompt_output_len
+
+        mask = len(prompt_id) * [0] + len(output_id) * [1]
+        response_mask.append(mask)
+
+    # Pad tokenized_ids and response_mask
+    
+    padded_ids = []
+    padded_masks = []
+    EOS = tokenizer.encode(tokenizer.eos_token)[0]
+    for tokenized_id, mask in zip(tokenized_ids, response_mask):
+        pad_len = max_prompt_output_len - len(tokenized_id)
+        padded_ids.append(tokenized_id + (pad_len * [EOS]))
+        padded_masks.append(mask + (pad_len * [0]))
+
+    # Construct tensors
+    encoding = torch.tensor(padded_ids)
+    response_mask = torch.tensor(padded_masks)
+    
+    res = {
+        "token_ids": encoding,
+        "response_mask": response_mask
+    }
+
+    return res
+
+class SFTDataset(Dataset):
+    def __init__(self, data_path) -> None:
+        super().__init__()
+
+        self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+        tokenized_data = self.tokenize_data(data_path, self.tokenizer)
+        self.token_ids = tokenized_data["token_ids"]
+        self.response_masks = tokenized_data["response_mask"]
+        
+    def tokenize_data(self, data_path, tokenizer)-> dict[str, Tensor]:
+        prompts = []
+        outputs = []
+        with open(data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                sample = json.loads(line)
+                prompts.append(sample["prompt"])
+                outputs.append(sample["response"])
+        
+        tokenized_data = tokenize_prompt_and_output(prompts, outputs, tokenizer)
+        return tokenized_data
+    
+    def __len__(self) -> int:
+        return len(self.token_ids)
+    
+    def __getitem__(self, index) -> tuple:
+        return self.token_ids[index], self.response_masks[index]
+#-------------------------- new --------------------------
+        
 def get_dataloaders(config, distributed=True):
     if config.training.batch_size % (config.ngpus * config.training.accum) != 0:
             raise ValueError(f"Train Batch Size {config.training.batch_size} is not divisible by {config.ngpus} gpus with accumulation {config.training.accum}.")
@@ -236,3 +321,16 @@ def get_dataloaders(config, distributed=True):
     ))
     return train_loader, valid_loader
 
+
+if __name__ == "__main__":
+    pass
+
+    # prompt_strs = ["a", "b c"]
+    # output_strs = ["fafsfdsfa", "1"]
+    # tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    # res = tokenize_prompt_and_output(
+    #     prompt_strs,
+    #     output_strs,
+    #     tokenizer
+    # )
+    # print(res)
