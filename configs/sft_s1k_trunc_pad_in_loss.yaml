@@ -19,7 +19,7 @@ training:
   snapshot_freq: 40          # checkpoints at step 40/80/120
   log_freq: 1
   eval_freq: 10              # ~every 0.5 epoch
-  snapshot_freq_for_preemption: 20
+  snapshot_freq_for_preemption: 40
   weight: standard
   snapshot_sampling: True    # dump conditional (SFT) generations at each snapshot
   ema: 0.9999
@@ -28,6 +28,12 @@ data:
   train: data/s1k_train_trunc.jsonl   # or s1k_train_filtered.jsonl
   valid: data/s1k_val_trunc.jsonl     # or s1k_val_filtered.jsonl
   pad_in_loss: True   # True: also supervise EOS padding (stronger stop signal)
+
+wandb:
+  enabled: True
+  project: sft_s1k_trunc_pad_in_loss
+  entity: SEDD_SFT           # null -> your default wandb entity
+  mode: online       # online | offline | disabled
 
 graph:
   type: absorb

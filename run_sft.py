@@ -9,6 +9,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
+import wandb
+from omegaconf import OmegaConf
 
 import data
 import losses
@@ -72,6 +74,18 @@ def _run(rank, world_size, cfg):
 
     mprint(work_dir)
     mprint(cfg)
+
+    # wandb logging (rank 0 only)
+    use_wandb = (rank == 0) and OmegaConf.select(cfg, "wandb.enabled", default=True)
+    if use_wandb:
+        wandb.init(
+            project=OmegaConf.select(cfg, "wandb.project", default="sedd-sft"),
+            entity=OmegaConf.select(cfg, "wandb.entity", default=None),
+            name=getattr(cfg, "wandb_name", None),
+            mode=OmegaConf.select(cfg, "wandb.mode", default="online"),
+            dir=work_dir,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         mprint("Found {} CUDA devices.".format(torch.cuda.device_count()))
@@ -183,6 +197,10 @@ def _run(rank, world_size, cfg):
                 loss /= world_size
 
                 mprint("step: %d, training_loss: %.5e" % (step, loss.item()))
+                if use_wandb:
+                    wandb.log({"train/loss": loss.item(),
+                               "train/lr": state['optimizer'].param_groups[0]['lr']},
+                              step=step)
             
             if step % cfg.training.snapshot_freq_for_preemption == 0 and rank == 0:
                 utils.save_checkpoint(checkpoint_meta_dir, state)
@@ -197,6 +215,8 @@ def _run(rank, world_size, cfg):
                 eval_loss /= world_size
 
                 mprint("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
+                if use_wandb:
+                    wandb.log({"eval/loss": eval_loss.item()}, step=step)
 
             if step > 0 and step % cfg.training.snapshot_freq == 0 or step == num_train_steps:
                 # Save the checkpoint.
@@ -266,7 +286,12 @@ def _run(rank, world_size, cfg):
                             dist.all_reduce(total_perplexity)
                             total_perplexity /= world_size
                             mprint(f"Generative Perplexity at step: {step}. Perplexity: {total_perplexity:.3f}.")
+                            if use_wandb:
+                                wandb.log({"eval/gen_ppl": total_perplexity.item()}, step=step)
 
                             del eval_model, logits
 
                     dist.barrier()
+
+    if use_wandb:
+        wandb.finish()
