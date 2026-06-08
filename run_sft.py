@@ -160,9 +160,8 @@ def _run(rank, world_size, cfg):
     eval_step_fn = losses.get_step_fn(noise, graph, False, optimize_fn, cfg.training.accum, loss_type="sft")
 
 
-    if cfg.training.snapshot_sampling:
-        sampling_shape = (cfg.training.batch_size // (cfg.ngpus * cfg.training.accum), cfg.model.length)
-        sampling_fn = sampling.get_sampling_fn(cfg, graph, noise, sampling_shape, sampling_eps, device)
+    # NOTE: conditional (SFT) snapshot sampling builds its sampler per-batch
+    # inside the loop below, since proj_fun depends on the specific prompts.
 
     num_train_steps = cfg.training.n_iters
     mprint(f"Starting training loop at step {initial_step}.")
@@ -206,42 +205,68 @@ def _run(rank, world_size, cfg):
                     utils.save_checkpoint(os.path.join(
                         checkpoint_dir, f'checkpoint_{save_step}.pth'), state)
 
-                # Generate and save samples
+                # Generate CONDITIONAL (SFT) samples: pin prompts taken from the
+                # eval set and let the model fill only the response positions.
                 if cfg.training.snapshot_sampling:
-                    mprint(f"Generating text at step: {step}")
+                    mprint(f"Generating conditional samples at step: {step}")
 
                     this_sample_dir = os.path.join(sample_dir, "iter_{}".format(step))
                     utils.makedirs(this_sample_dir)
 
+                    # a batch of prompts/responses from the eval set
+                    cond_token_ids, cond_response_mask = next(eval_iter)
+                    cond_token_ids = cond_token_ids.to(device)
+                    cond_response_mask = cond_response_mask.to(device)
+
+                    # pin everything that is NOT a response token (prompt + padding)
+                    prompt_mask = (cond_response_mask == 0)
+
+                    def proj_fun(x):
+                        x[prompt_mask] = cond_token_ids[prompt_mask]
+                        return x
+
+                    sampling_fn = sampling.get_pc_sampler(
+                        graph, noise, cond_token_ids.shape,
+                        predictor=cfg.sampling.predictor,
+                        steps=cfg.sampling.steps,
+                        denoise=cfg.sampling.noise_removal,
+                        eps=sampling_eps, device=device,
+                        proj_fun=proj_fun,
+                    )
+
                     ema.store(score_model.parameters())
                     ema.copy_to(score_model.parameters())
-                    sample = sampling_fn(score_model)
+                    sample = proj_fun(sampling_fn(score_model))
                     ema.restore(score_model.parameters())
 
-                    sentences = tokenizer.batch_decode(sample)
-                    
+                    gen_sentences = tokenizer.batch_decode(sample)
+                    gt_sentences = tokenizer.batch_decode(cond_token_ids)
+
                     file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
-                    with open(file_name, 'w') as file:
-                        for sentence in sentences:
-                            file.write(sentence + "\n")
-                            file.write("============================================================================================\n")
+                    with open(file_name, 'w', encoding="utf-8") as file:
+                        for idx, (gen, gt) in enumerate(zip(gen_sentences, gt_sentences)):
+                            resp_ids = sample[idx][cond_response_mask[idx].bool()]
+                            resp_text = tokenizer.decode(resp_ids)
+                            file.write(f"[{idx}] GENERATED RESPONSE:\n{resp_text}\n")
+                            file.write(f"[{idx}] GENERATED (full):\n{gen}\n")
+                            file.write(f"[{idx}] GROUND TRUTH (full):\n{gt}\n")
+                            file.write("=" * 92 + "\n")
 
                     if cfg.eval.perplexity:
                         with torch.no_grad():
                             eval_model = GPT2LMHeadModel.from_pretrained("gpt2-large").to(device).eval()
-                            batches = sample.shape[0] // cfg.eval.perplexity_batch_size
-                            total_perplexity = 0
-                            for i in range(batches):
-                                s = sample[i * cfg.eval.perplexity_batch_size:(i + 1) * cfg.eval.perplexity_batch_size]
-                                loss, logits = eval_model(s, labels=s)[:2]
-                                logits = logits.transpose(-1, -2)
-                                perplexity = F.cross_entropy(logits[..., :-1], s[..., 1:], reduction="none").mean(dim=-1).exp().mean()
-                                total_perplexity += perplexity
-                            total_perplexity /= batches
+                            _, logits = eval_model(sample, labels=sample)[:2]
+                            logits = logits.transpose(-1, -2)                    # [B, V, L]
+                            token_loss = F.cross_entropy(
+                                logits[..., :-1], sample[..., 1:], reduction="none")  # [B, L-1]
+                            # only score response positions (shift by 1 for next-token)
+                            rmask = cond_response_mask[:, 1:].float()
+                            seq_loss = (token_loss * rmask).sum(-1) / rmask.sum(-1).clamp(min=1)
+                            total_perplexity = seq_loss.exp().mean()
                             dist.all_reduce(total_perplexity)
                             total_perplexity /= world_size
                             mprint(f"Generative Perplexity at step: {step}. Perplexity: {total_perplexity:.3f}.")
 
-                            del eval_model, logits, loss
+                            del eval_model, logits
 
                     dist.barrier()
