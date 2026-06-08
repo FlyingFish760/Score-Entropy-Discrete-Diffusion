@@ -2,7 +2,7 @@ defaults:
   - _self_
   - model: small
 
-ngpus: 1
+ngpus: 4
 tokens: 50257
 
 training:
@@ -19,7 +19,7 @@ training:
 
 data:
   train: data/sft_train.jsonl
-  valid: data/sft_val.jsonl
+  valid: data/sft_train.jsonl   # to be changed
 
 graph:
   type: absorb

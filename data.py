@@ -13,7 +13,7 @@ import json
 from datasets import Dataset
 
 from torch.utils.data import DataLoader, DistributedSampler
-
+from torch.utils.data import Dataset as TorchDataset
 
 def cycle_loader(dataloader, sampler=None):
     while 1:
@@ -256,7 +256,7 @@ def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], t
 
     return res
 
-class SFTDataset(Dataset):
+class SFTDataset(TorchDataset):
     def __init__(self, data_path) -> None:
         super().__init__()
 

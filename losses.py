@@ -7,7 +7,7 @@ import graph_lib
 from model import utils as mutils
 
 
-def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False, loss_type: str="pretrain") -> function:
+def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False, loss_type: str="pretrain"):
 
     def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None):
         """
@@ -109,8 +109,8 @@ def optimization_manager(config):
     return optimize_fn
 
 
-def get_step_fn(noise, graph, train, optimize_fn, accum, loss_type: str) -> function:
-    loss_fn = get_loss_fn(noise, graph, train, loss_type)
+def get_step_fn(noise, graph, train, optimize_fn, accum, loss_type: str):
+    loss_fn = get_loss_fn(noise, graph, train, loss_type=loss_type)
 
     accum_iter = 0
     total_loss = 0

@@ -9,7 +9,7 @@ from hydra.types import RunMode
 from omegaconf import OmegaConf, open_dict
 
 
-@hydra.main(version_base=None, config_path="configs/sft", config_name="base")
+@hydra.main(version_base=None, config_path="configs", config_name="sft_base")
 def main(cfg):
     ngpus = cfg.ngpus
     if "load_dir" in cfg:
