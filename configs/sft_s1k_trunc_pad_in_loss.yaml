@@ -31,8 +31,9 @@ data:
 
 wandb:
   enabled: True
-  project: sft_s1k_trunc_pad_in_loss
+  project: sedd_sft
   entity: SEDD_SFT           # null -> your default wandb entity
+  name: s1k_trunc_pad_in_loss               # run name; null -> falls back to the run dir name
   mode: online       # online | offline | disabled
 
 graph:

@@ -75,17 +75,23 @@ def _run(rank, world_size, cfg):
     mprint(work_dir)
     mprint(cfg)
 
-    # wandb logging (rank 0 only)
+    # wandb logging (rank 0 only). Never let a wandb failure crash training /
+    # break the NCCL handshake on the other ranks.
     use_wandb = (rank == 0) and OmegaConf.select(cfg, "wandb.enabled", default=True)
     if use_wandb:
-        wandb.init(
-            project=OmegaConf.select(cfg, "wandb.project", default="sedd-sft"),
-            entity=OmegaConf.select(cfg, "wandb.entity", default=None),
-            name=getattr(cfg, "wandb_name", None),
-            mode=OmegaConf.select(cfg, "wandb.mode", default="online"),
-            dir=work_dir,
-            config=OmegaConf.to_container(cfg, resolve=True),
-        )
+        try:
+            wandb.init(
+                project=OmegaConf.select(cfg, "wandb.project", default="sedd-sft"),
+                entity=OmegaConf.select(cfg, "wandb.entity", default=None),
+                # explicit wandb.name wins; otherwise fall back to the run dir name
+                name=OmegaConf.select(cfg, "wandb.name", default=None) or getattr(cfg, "wandb_name", None),
+                mode=OmegaConf.select(cfg, "wandb.mode", default="online"),
+                dir=work_dir,
+                config=OmegaConf.to_container(cfg, resolve=True),
+            )
+        except Exception as e:
+            mprint(f"wandb.init failed ({e}); continuing without wandb logging.")
+            use_wandb = False
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         mprint("Found {} CUDA devices.".format(torch.cuda.device_count()))
