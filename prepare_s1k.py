@@ -144,8 +144,6 @@ def parse_args():
                    help="use the raw question as prompt instead of 'Question: ...\\nAnswer:'")
     p.add_argument("--no-eos", dest="eos", action="store_false",
                    help="do not append <|endoftext|> to the response")
-    p.add_argument("--default-variant", default="trunc", choices=["trunc", "filtered"],
-                   help="which variant is also copied to data/sft_{train,val}.jsonl")
     return p.parse_args()
 
 
@@ -212,14 +210,7 @@ def main():
     write_jsonl(os.path.join(out, "s1k_train_trunc.jsonl"), t_train)
     write_jsonl(os.path.join(out, "s1k_val_trunc.jsonl"), t_val)
 
-    # ---- copy chosen variant to the paths sft_base.yaml expects -----------
-    default_train = f_train if args.default_variant == "filtered" else t_train
-    default_val = f_val if args.default_variant == "filtered" else t_val
-    print(f"\n[default -> {args.default_variant}]  (used by configs/sft_base.yaml)")
-    write_jsonl(os.path.join(out, "sft_train.jsonl"), default_train)
-    write_jsonl(os.path.join(out, "sft_val.jsonl"), default_val)
-
-    print("\nDone.")
+    print("\nDone. Point cfg.data.train / cfg.data.valid at the variant you want.")
 
 
 if __name__ == "__main__":

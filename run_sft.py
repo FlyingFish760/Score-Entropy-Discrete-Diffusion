@@ -124,8 +124,9 @@ def _run(rank, world_size, cfg):
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
 
     # Build data iterators
-    train_set = SFTDataset(cfg.data.train)
-    eval_set = SFTDataset(cfg.data.valid)
+    pad_in_loss = cfg.data.get("pad_in_loss", False)
+    train_set = SFTDataset(cfg.data.train, pad_in_loss=pad_in_loss)
+    eval_set = SFTDataset(cfg.data.valid, pad_in_loss=pad_in_loss)
 
     if world_size > 1:
         train_sampler = DistributedSampler(train_set)

@@ -18,8 +18,9 @@ training:
   ema: 0.9999
 
 data:
-  train: data/sft_train.jsonl
-  valid: data/sft_val.jsonl   # produced by prepare_s1k.py
+  train: data/s1k_train_trunc.jsonl   # set to the variant produced by prepare_s1k.py
+  valid: data/s1k_val_trunc.jsonl
+  pad_in_loss: False   # True: also supervise the EOS padding (stronger stop signal)
 
 graph:
   type: absorb
