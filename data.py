@@ -200,15 +200,22 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
     return chunked_dataset
 
 #-------------------------- new --------------------------
-def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer):
+def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], tokenizer,
+                               pad_in_loss: bool = False):
     """
     Tokenize the prompt and output strings, and construct a mask that is 1 for the response tokens
-    and 0 for other tokens (prompt or padding).
+    and 0 for the prompt tokens. Padding tokens (EOS) are controlled by `pad_in_loss`.
 
     Args:
         prompt_strs (list[str]): List of prompt strings.
         output_strs (list[str]): List of output strings.
         tokenizer (PreTrainedTokenizer): Tokenizer to use for tokenization.
+        pad_in_loss (bool): Whether the EOS padding tokens are included in the loss.
+            - False (default): padding mask = 0, i.e. only the real response tokens
+              are supervised (prompt and padding are excluded from the loss).
+            - True: padding mask = 1, i.e. the trailing EOS padding is also supervised,
+              teaching the model to fill the tail with EOS (a stronger "stop" signal).
+              Prompt tokens are still excluded (mask = 0).
 
     Returns:
         dict[str, torch.Tensor]: Let prompt_and_output_lens be a list containing the lengths of
@@ -240,10 +247,11 @@ def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], t
     padded_ids = []
     padded_masks = []
     EOS = tokenizer.encode(tokenizer.eos_token)[0]
+    pad_mask_value = 1 if pad_in_loss else 0
     for tokenized_id, mask in zip(tokenized_ids, response_mask):
         pad_len = max_prompt_output_len - len(tokenized_id)
         padded_ids.append(tokenized_id + (pad_len * [EOS]))
-        padded_masks.append(mask + (pad_len * [0]))
+        padded_masks.append(mask + (pad_len * [pad_mask_value]))
 
     # Construct tensors
     encoding = torch.tensor(padded_ids)
@@ -257,14 +265,15 @@ def tokenize_prompt_and_output(prompt_strs: list[str], output_strs: list[str], t
     return res
 
 class SFTDataset(TorchDataset):
-    def __init__(self, data_path) -> None:
+    def __init__(self, data_path, pad_in_loss: bool = False) -> None:
         super().__init__()
 
+        self.pad_in_loss = pad_in_loss
         self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         tokenized_data = self.tokenize_data(data_path, self.tokenizer)
         self.token_ids = tokenized_data["token_ids"]
         self.response_masks = tokenized_data["response_mask"]
-        
+
     def tokenize_data(self, data_path, tokenizer)-> dict[str, Tensor]:
         prompts = []
         outputs = []
@@ -273,8 +282,9 @@ class SFTDataset(TorchDataset):
                 sample = json.loads(line)
                 prompts.append(sample["prompt"])
                 outputs.append(sample["response"])
-        
-        tokenized_data = tokenize_prompt_and_output(prompts, outputs, tokenizer)
+
+        tokenized_data = tokenize_prompt_and_output(prompts, outputs, tokenizer,
+                                                    pad_in_loss=self.pad_in_loss)
         return tokenized_data
     
     def __len__(self) -> int:

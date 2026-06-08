@@ -19,7 +19,7 @@ training:
 
 data:
   train: data/sft_train.jsonl
-  valid: data/sft_train.jsonl   # to be changed
+  valid: data/sft_val.jsonl   # produced by prepare_s1k.py
 
 graph:
   type: absorb
