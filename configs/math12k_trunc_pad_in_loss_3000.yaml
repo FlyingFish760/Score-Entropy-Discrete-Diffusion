@@ -1,0 +1,79 @@
+defaults:
+  - _self_
+  - model: small
+
+# R1-zero reasoning SFT (data produced by prepare_sft_jsonl.py from
+# sft_gpt-oss-120b_filtered.jsonl: problem -> r1_zero template, reasoning_trace
+# -> response, expected_answer -> "answer" field used for format/answer metrics).
+# Hardware: 3 x 48GB GPU.
+# Data size: ~3496 records (trunc keeps all; carve a val split with --n-val).
+#   1 optimizer step consumes `training.batch_size` sequences.
+#   1 epoch  ~= 3496 / 48 ~= 73 steps.
+#   n_iters 3000 ~= 41 epochs (long; watch eval/loss + answer_acc for overfit).
+
+ngpus: 3   # set to your hardware; batch_size must be divisible by ngpus*accum
+tokens: 50257
+
+training:
+  batch_size: 48     # sequences per optimizer step (global); 48 % (3*1) == 0
+  accum: 1           # micro_batch = batch_size / (ngpus*accum) = 16 per GPU
+  n_iters: 3000      # ~41 epochs over ~3496 samples
+  snapshot_freq: 1000        
+  log_freq: 10
+  eval_freq: 100             # ~every 1.4 epochs
+  snapshot_freq_for_preemption: 1000
+  weight: standard
+  snapshot_sampling: True    # conditional gen + format/answer accuracy each snapshot
+  ema: 0.9999
+
+data:
+  # produce with:
+  #   python prepare_sft_jsonl.py --input <...>/sft_gpt-oss-120b_filtered.jsonl \
+  #          --out-dir data --n-val 200
+  train: data/sft_gpt-oss-120b_filtered_trunc_train.jsonl
+  valid: data/sft_gpt-oss-120b_filtered_trunc_val.jsonl
+  pad_in_loss: True   # True: also supervise EOS padding (stronger stop signal)
+
+wandb:
+  enabled: True
+  project: sedd_sft
+  entity: SEDD_SFT                      # null -> your default wandb entity
+  name: math12k_trunc_pad_in_loss_3000_iters
+  mode: online       # online | offline | disabled
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: loglinear
+  sigma_min: 1e-4
+  sigma_max: 20
+
+sampling:
+  predictor: euler
+  steps: 128
+  noise_removal: True
+
+eval:
+  batch_size: 48    # 48 % (3*1) == 0
+  perplexity: False         # metrics come from the grader, not gpt2-large PPL
+  perplexity_batch_size: 48
+
+optim:
+  weight_decay: 0
+  optimizer: AdamW
+  lr: 1e-4       # larger global batch (48) tolerates the base lr
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+  warmup: 100    # ~1.4 epochs
+  grad_clip: 1.
+
+hydra:
+  run:
+    dir: exp_local/sft_reason/${now:%Y.%m.%d}/${now:%H%M%S}
+  sweep:
+    dir: exp/sft_reason/${now:%Y.%m.%d}/${now:%H%M%S}
+    subdir: ${hydra.job.num}
