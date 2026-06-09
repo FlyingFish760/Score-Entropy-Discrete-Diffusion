@@ -16,14 +16,24 @@ def load_model_hf(dir, device):
 
 
 def load_model_local(root_dir, device):
-    cfg = utils.load_hydra_config_from_run(root_dir)
+    # Accept either a run directory (use checkpoints-meta/checkpoint.pth) OR a
+    # specific checkpoint .pth file (e.g. checkpoints/checkpoint_3.pth). In the
+    # latter case derive the run dir as the checkpoint's grandparent directory:
+    #   <run_dir>/checkpoints[-meta]/<file>.pth  ->  run_dir = dirname(dirname)
+    if os.path.isfile(root_dir) or root_dir.endswith(".pth"):
+        ckpt_path = root_dir
+        run_dir = os.path.dirname(os.path.dirname(ckpt_path))
+    else:
+        run_dir = root_dir
+        ckpt_path = os.path.join(run_dir, "checkpoints-meta", "checkpoint.pth")
+
+    cfg = utils.load_hydra_config_from_run(run_dir)
     graph = graph_lib.get_graph(cfg, device)
     noise = noise_lib.get_noise(cfg).to(device)
     score_model = SEDD(cfg).to(device)
     ema = ExponentialMovingAverage(score_model.parameters(), decay=cfg.training.ema)
 
-    ckpt_dir = os.path.join(root_dir, "checkpoints-meta", "checkpoint.pth")
-    loaded_state = torch.load(ckpt_dir, map_location=device)
+    loaded_state = torch.load(ckpt_path, map_location=device)
 
     score_model.load_state_dict(loaded_state['model'])
     ema.load_state_dict(loaded_state['ema'])
