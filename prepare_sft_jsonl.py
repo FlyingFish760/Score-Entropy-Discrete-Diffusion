@@ -1,22 +1,29 @@
 """
-Re-process an EXISTING {"prompt","response"} SFT .jsonl into the fixed-length
-variants consumed by SFTDataset (data.py). Use this when the prompt template is
-already baked into the data (e.g. the R1-style <think>/<answer> data), so unlike
-prepare_s1k.py there is NO dataset loading and NO template building here.
+Build the SFTDataset-ready jsonl from the RAW reasoning data
+(problem / reasoning_trace / expected_answer), applying the r1_zero prompt
+template, and ADDITIONALLY carrying the ground-truth answer in each record.
 
-What it does (mirrors prepare_s1k.py's post-processing philosophy):
+Output record:
+    {"prompt": <template+question, ends with "Assistant: <think>">,
+     "response": <reasoning_trace, +EOS if complete>,
+     "answer": <expected_answer, the correct answer for evaluation>}
+
+SFTDataset (data.py) only reads "prompt"/"response", so the extra "answer" field
+is harmless for training and available for conditional-generation grading.
+
+Length handling (same philosophy as prepare_s1k.py):
   * append EOS to COMPLETE responses -> a genuine "answer finished" stop signal
   * enforce --max-length, emitting two variants:
       - filtered : drop samples whose prompt+response(+EOS) exceeds max_length
-      - trunc    : truncate the response to fit; a truncated answer is INCOMPLETE
-                   (its real ending is cut off), so it gets NO trailing EOS
-  * prompt/response are kept verbatim; only EOS + length are handled
+      - trunc    : truncate the response to fit; a truncated answer is INCOMPLETE,
+                   so it gets NO trailing EOS
+  * if the prompt alone >= max_length the sample is dropped (prompt is never cut)
 
 Usage
 -----
-    python prepare_sft_jsonl.py --input path/to/sft_train.jsonl
-    python prepare_sft_jsonl.py --input sft_train.jsonl --max-length 1024 --no-eos
-    python prepare_sft_jsonl.py --input sft_train.jsonl --n-val 100   # carve a val split
+    python prepare_sft_jsonl.py --input path/to/sft_gpt-oss-120b_filtered.jsonl
+    python prepare_sft_jsonl.py --input raw.jsonl --template prompt_template/r1_zero.prompt
+    python prepare_sft_jsonl.py --input raw.jsonl --n-val 100 --no-eos
 """
 
 import argparse
@@ -42,11 +49,10 @@ def fits(tokenizer, prompt: str, response: str, max_length: int) -> int:
 
 def truncate_response(tokenizer, prompt: str, response: str, max_length: int):
     """
-    Truncate `response` (token-level) so that encode(prompt)+encode(response)
-    <= max_length. NO trailing EOS: a truncated sample is an *incomplete* answer
-    (the real content continues past max_length), so it must not carry the
-    "reasoning finished" stop signal. Full budget goes to content. Re-verified by
-    re-encoding (decode->encode can drift by a token at the boundary).
+    Truncate `response` (token-level) so prompt+response <= max_length. NO trailing
+    EOS: a truncated sample is an *incomplete* answer (content continues past
+    max_length), so it must not carry the "reasoning finished" stop signal. Full
+    budget goes to content. Re-verified by re-encoding (decode->encode can drift).
 
     Returns None if the prompt alone leaves no room for a response.
     """
@@ -70,16 +76,24 @@ def truncate_response(tokenizer, prompt: str, response: str, max_length: int):
 # io
 # ---------------------------------------------------------------------------
 
-def read_jsonl(path):
-    records = []
+def load_raw(path):
+    """Load a JSON array OR a line-delimited jsonl of raw records."""
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            o = json.loads(line)
-            records.append({"prompt": o["prompt"], "response": o["response"]})
-    return records
+        text = f.read()
+    stripped = text.lstrip()
+    if stripped.startswith("["):
+        return json.loads(stripped)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def load_template(path):
+    """Load the prompt template, normalising CRLF/CR -> LF to match training data."""
+    with open(path, "r", encoding="utf-8") as f:
+        tmpl = f.read()
+    tmpl = tmpl.replace("\r\n", "\n").replace("\r", "\n")
+    if "{question}" not in tmpl:
+        raise ValueError(f"template {path} has no {{question}} placeholder")
+    return tmpl
 
 
 def write_jsonl(path, records):
@@ -108,13 +122,19 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input", required=True,
-                   help="existing {prompt,response} jsonl to re-process")
+                   help="raw data (JSON array or jsonl) with problem/reasoning_trace/expected_answer")
+    p.add_argument("--template", default="prompt_template/r1_zero.prompt",
+                   help="prompt template file containing a {question} placeholder")
     p.add_argument("--out-dir", default=None,
                    help="output directory (default: same dir as --input)")
+    p.add_argument("--question-field", default="problem")
+    p.add_argument("--response-field", default="reasoning_trace")
+    p.add_argument("--answer-field", default="expected_answer",
+                   help="ground-truth answer field carried into the output as 'answer'")
     p.add_argument("--max-length", type=int, default=1024,
                    help="must match cfg.model.length")
     p.add_argument("--n-val", type=int, default=0,
-                   help="held-out validation samples (0 = no split, process file as-is)")
+                   help="held-out validation samples (0 = no split)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-eos", dest="eos", action="store_false",
                    help="do not append <|endoftext|> to complete responses")
@@ -130,32 +150,38 @@ def main():
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(in_path))
     stem = os.path.splitext(os.path.basename(in_path))[0]
 
+    template = load_template(args.template)
     print(f"Reading {in_path} ...")
-    records = read_jsonl(in_path)
-    print(f"  {len(records)} records; append_eos={args.eos}, max_length={args.max_length}")
+    raw = load_raw(in_path)
+    print(f"  {len(raw)} records; append_eos={args.eos}, max_length={args.max_length}")
 
     filtered, trunc = [], []
     n_truncated = 0
     n_dropped = 0
 
-    for rec in records:
-        prompt = rec["prompt"]
-        response = rec["response"] + eos_str          # complete -> stop signal
+    for ex in raw:
+        question = str(ex[args.question_field])
+        reasoning = str(ex[args.response_field])
+        answer = ex.get(args.answer_field, "")
+
+        prompt = template.replace("{question}", question)
+        response = reasoning + eos_str          # complete -> stop signal
 
         if fits(tokenizer, prompt, response, args.max_length) <= args.max_length:
-            filtered.append({"prompt": prompt, "response": response})
-            trunc.append({"prompt": prompt, "response": response})
+            rec = {"prompt": prompt, "response": response, "answer": answer}
+            filtered.append(rec)
+            trunc.append(rec)
             continue
 
-        # too long: truncate the ORIGINAL response (no EOS, it is incomplete)
-        resp_trunc = truncate_response(tokenizer, prompt, rec["response"], args.max_length)
+        # too long: truncate the ORIGINAL reasoning (no EOS, it is incomplete)
+        resp_trunc = truncate_response(tokenizer, prompt, reasoning, args.max_length)
         if resp_trunc is None:
             n_dropped += 1
             continue
-        trunc.append({"prompt": prompt, "response": resp_trunc})
+        trunc.append({"prompt": prompt, "response": resp_trunc, "answer": answer})
         n_truncated += 1
 
-    print(f"\nProcessed: {len(records)} records")
+    print(f"\nProcessed: {len(raw)} records")
     print(f"  fit-as-is (filtered kept): {len(filtered)}")
     print(f"  truncated into trunc:      {n_truncated}")
     print(f"  dropped (prompt too long): {n_dropped}")

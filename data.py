@@ -277,21 +277,27 @@ class SFTDataset(TorchDataset):
     def tokenize_data(self, data_path, tokenizer)-> dict[str, Tensor]:
         prompts = []
         outputs = []
+        answers = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 sample = json.loads(line)
                 prompts.append(sample["prompt"])
                 outputs.append(sample["response"])
+                # ground-truth answer (str) for grading; "" if not present
+                answers.append(str(sample.get("answer", "")))
+        # keep the raw answers aligned with token_ids for eval-time grading
+        self.answers = answers
 
         tokenized_data = tokenize_prompt_and_output(prompts, outputs, tokenizer,
                                                     pad_in_loss=self.pad_in_loss)
         return tokenized_data
-    
+
     def __len__(self) -> int:
         return len(self.token_ids)
-    
+
     def __getitem__(self, index) -> tuple:
-        return self.token_ids[index], self.response_masks[index]
+        # answer is a plain str; default_collate batches these into a list[str]
+        return self.token_ids[index], self.response_masks[index], self.answers[index]
 #-------------------------- new --------------------------
         
 def get_dataloaders(config, distributed=True):

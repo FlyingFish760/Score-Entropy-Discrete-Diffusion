@@ -12,6 +12,14 @@ import torch.nn.functional as F
 import wandb
 from omegaconf import OmegaConf
 
+try:
+    from grader import r1_zero_reward_fn
+    HAS_GRADER = True
+except Exception as _grader_err:   # heavy deps (sympy/math_verify/...) may be absent
+    r1_zero_reward_fn = None
+    HAS_GRADER = False
+    _GRADER_IMPORT_ERR = _grader_err
+
 import data
 import losses
 import sampling
@@ -191,7 +199,7 @@ def _run(rank, world_size, cfg):
         step = state['step']
 
 
-        token_ids, response_mask = next(train_iter)
+        token_ids, response_mask, _ = next(train_iter)
         token_ids = token_ids.to(device)
         response_mask = response_mask.to(device)
         loss = train_step_fn(state, token_ids, response_mask)
@@ -212,7 +220,7 @@ def _run(rank, world_size, cfg):
                 utils.save_checkpoint(checkpoint_meta_dir, state)
 
             if step % cfg.training.eval_freq == 0:
-                eval_token_ids, eval_response_mask = next(eval_iter)
+                eval_token_ids, eval_response_mask, _ = next(eval_iter)
                 eval_token_ids = eval_token_ids.to(device)
                 eval_response_mask = eval_response_mask.to(device)
                 eval_loss = eval_step_fn(state, eval_token_ids, eval_response_mask)
@@ -239,8 +247,8 @@ def _run(rank, world_size, cfg):
                     this_sample_dir = os.path.join(sample_dir, "iter_{}".format(step))
                     utils.makedirs(this_sample_dir)
 
-                    # a batch of prompts/responses from the eval set
-                    cond_token_ids, cond_response_mask = next(eval_iter)
+                    # a batch of prompts/responses/answers from the eval set
+                    cond_token_ids, cond_response_mask, cond_answers = next(eval_iter)
                     cond_token_ids = cond_token_ids.to(device)
                     cond_response_mask = cond_response_mask.to(device)
 
@@ -268,15 +276,53 @@ def _run(rank, world_size, cfg):
                     gen_sentences = tokenizer.batch_decode(sample)
                     gt_sentences = tokenizer.batch_decode(cond_token_ids)
 
+                    # grade generated responses with r1_zero_reward_fn (format/answer)
+                    fmt_sum = 0.0
+                    ans_sum = 0.0
+                    n_graded = 0
+
                     file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
                     with open(file_name, 'w', encoding="utf-8") as file:
                         for idx, (gen, gt) in enumerate(zip(gen_sentences, gt_sentences)):
                             resp_ids = sample[idx][cond_response_mask[idx].bool()]
                             resp_text = tokenizer.decode(resp_ids)
+                            gt_answer = cond_answers[idx]
+
+                            fmt_r = ans_r = 0.0
+                            if HAS_GRADER and gt_answer:
+                                try:
+                                    rew = r1_zero_reward_fn(resp_text, gt_answer)
+                                    fmt_r = float(rew["format_reward"])
+                                    ans_r = float(rew["answer_reward"])
+                                except Exception:
+                                    fmt_r = ans_r = 0.0
+                                fmt_sum += fmt_r
+                                ans_sum += ans_r
+                                n_graded += 1
+
                             file.write(f"[{idx}] GENERATED RESPONSE:\n{resp_text}\n")
+                            file.write(f"[{idx}] GT ANSWER: {gt_answer} | "
+                                       f"format={fmt_r} answer={ans_r}\n")
                             file.write(f"[{idx}] GENERATED (full):\n{gen}\n")
                             file.write(f"[{idx}] GROUND TRUTH (full):\n{gt}\n")
                             file.write("=" * 92 + "\n")
+
+                    # aggregate format/answer accuracy across ranks (HAS_GRADER is
+                    # identical on every rank, so this collective never deadlocks)
+                    if HAS_GRADER:
+                        agg = torch.tensor([fmt_sum, ans_sum, float(n_graded)], device=device)
+                        dist.all_reduce(agg)
+                        if agg[2] > 0:
+                            format_acc = (agg[0] / agg[2]).item()
+                            answer_acc = (agg[1] / agg[2]).item()
+                            mprint("step: %d, format_acc: %.4f, answer_acc: %.4f (n=%d)"
+                                   % (step, format_acc, answer_acc, int(agg[2].item())))
+                            if use_wandb:
+                                wandb.log({"eval/format_acc": format_acc,
+                                           "eval/answer_acc": answer_acc}, step=step)
+                    else:
+                        mprint(f"grader unavailable ({_GRADER_IMPORT_ERR}); "
+                               f"skipping format/answer accuracy.")
 
                     if cfg.eval.perplexity:
                         with torch.no_grad():
