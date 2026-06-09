@@ -20,7 +20,7 @@ training:
   n_iters: 3000      # ~41 epochs over ~3496 samples
   snapshot_freq: 1000        
   log_freq: 10
-  eval_freq: 100             # ~every 1.4 epochs
+  eval_freq: 200             # ~every 1.4 epochs
   snapshot_freq_for_preemption: 1000
   weight: standard
   snapshot_sampling: True    # conditional gen + format/answer accuracy each snapshot
