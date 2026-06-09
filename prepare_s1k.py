@@ -73,30 +73,30 @@ def fits(tokenizer, prompt: str, response: str, max_length: int) -> int:
 
 
 def truncate_response(tokenizer, prompt: str, response: str,
-                      max_length: int, eos_str: str):
+                      max_length: int):
     """
     Truncate `response` (token-level) so that encode(prompt)+encode(response)
-    <= max_length, keeping a trailing EOS. Returns the truncated response text,
-    re-verified by re-encoding (decode->encode can drift by a token at the
-    boundary, so we trim in a short loop until it genuinely fits).
+    <= max_length. NO trailing EOS is added: a truncated sample is an
+    *incomplete* answer (the real content continues past max_length), so it must
+    not carry the "reasoning finished" stop signal. The full budget goes to
+    content. Re-verified by re-encoding (decode->encode can drift by a token at
+    the boundary, so we trim in a short loop until it genuinely fits).
 
     Returns None if the prompt alone already does not leave room for a response.
     """
     prompt_len = len(encode(tokenizer, prompt))
-    eos_len = len(encode(tokenizer, eos_str)) if eos_str else 0
-    # need room for at least one real response token + the EOS
-    budget = max_length - prompt_len - eos_len
+    budget = max_length - prompt_len          # full budget -> content, no EOS
     if budget < 1:
         return None
 
     resp_ids = encode(tokenizer, response)
     resp_ids = resp_ids[:budget]
-    resp_text = tokenizer.decode(resp_ids) + eos_str
+    resp_text = tokenizer.decode(resp_ids)
 
     # re-encode verification loop (handles decode->encode drift)
     while fits(tokenizer, prompt, resp_text, max_length) > max_length and resp_ids:
         resp_ids = resp_ids[:-1]
-        resp_text = tokenizer.decode(resp_ids) + eos_str
+        resp_text = tokenizer.decode(resp_ids)
     if not resp_ids:
         return None
     return resp_text
@@ -175,10 +175,10 @@ def main():
             trunc.append({"prompt": prompt, "response": response})
             continue
 
-        # ---- trunc variant: cut the response down to size ----------------
+        # ---- trunc variant: cut the response down to size (no EOS) -------
         resp_trunc = truncate_response(tokenizer, prompt,
                                        build_response_core(ex, args.template),
-                                       args.max_length, eos_str)
+                                       args.max_length)
         if resp_trunc is None:
             n_dropped += 1
             continue
